@@ -1,0 +1,28 @@
+2025-08-22 17:28:37,907 - INFO - Starting Google search integration
+2025-08-22 17:28:37,946 - INFO - Successfully read input file: /home/amd3060/drug_extraction_project/data/1140816健保用藥品項查詢項目檔_健保用藥品項.csv
+2025-08-22 17:28:37,946 - INFO - Searching for: A000072100 - 鹽酸麻黃　錠２５公絲
+2025-08-22 17:28:37,946 - INFO - Executing Google search for: 鹽酸麻黃　錠２５公絲 適應症 用法用量 注意事項
+2025-08-22 17:28:37,989 - WARNING - Google API credentials not found. Using mock data for demonstration.
+2025-08-22 17:28:37,990 - INFO - Successfully processed 鹽酸麻黃　錠２５公絲
+2025-08-22 17:28:37,990 - INFO - Searching for: A000076100 - 安世多阿米諾思錠０．３公克
+2025-08-22 17:28:37,990 - INFO - Executing Google search for: 安世多阿米諾思錠０．３公克 適應症 用法用量 注意事項
+2025-08-22 17:28:37,990 - WARNING - Google API credentials not found. Using mock data for demonstration.
+2025-08-22 17:28:37,990 - INFO - Successfully processed 安世多阿米諾思錠０．３公克
+2025-08-22 17:28:37,990 - INFO - Searching for: A000096100 - 明那膠囊
+2025-08-22 17:28:37,990 - INFO - Executing Google search for: 明那膠囊 適應症 用法用量 注意事項
+2025-08-22 17:28:37,990 - WARNING - Google API credentials not found. Using mock data for demonstration.
+2025-08-22 17:28:37,990 - INFO - Successfully processed 明那膠囊
+2025-08-22 17:28:37,990 - INFO - Searching for: A000137151 - 複方甘草合劑液（不含阿片）
+2025-08-22 17:28:37,990 - INFO - Executing Google search for: 複方甘草合劑液（不含阿片） 適應症 用法用量 注意事項
+2025-08-22 17:28:37,990 - WARNING - Google API credentials not found. Using mock data for demonstration.
+2025-08-22 17:28:37,990 - INFO - Successfully processed 複方甘草合劑液（不含阿片）
+2025-08-22 17:28:37,990 - INFO - Searching for: A000173100 - 福得可錠１５公絲
+2025-08-22 17:28:37,990 - INFO - Executing Google search for: 福得可錠１５公絲 適應症 用法用量 注意事項
+2025-08-22 17:28:37,990 - WARNING - Google API credentials not found. Using mock data for demonstration.
+2025-08-22 17:28:37,990 - INFO - Successfully processed 福得可錠１５公絲
+2025-08-22 17:28:37,991 - INFO - Saved 5 search results to /home/amd3060/drug_extraction_project/output/google_search_results.csv
+2025-08-22 17:28:37,991 - INFO - Sample results:
+2025-08-22 17:28:37,991 - INFO - Result 1: {'藥品代號': 'A000072100', '藥品中文名稱': '鹽酸麻黃\u3000錠２５公絲', '適應症': '用於治療相關症狀。', '用法用量': '請遵照醫師指示。', '注意事項': '請詳閱說明書。'}
+2025-08-22 17:28:37,991 - INFO - Result 2: {'藥品代號': 'A000076100', '藥品中文名稱': '安世多阿米諾思錠０．３公克', '適應症': '用於治療相關症狀。', '用法用量': '請遵照醫師指示。', '注意事項': '請詳閱說明書。'}
+2025-08-22 17:28:37,991 - INFO - Result 3: {'藥品代號': 'A000096100', '藥品中文名稱': '明那膠囊', '適應症': '用於治療相關症狀。', '用法用量': '請遵照醫師指示。', '注意事項': '請詳閱說明書。'}
+2025-08-22 17:28:37,991 - INFO - Google search process completed
