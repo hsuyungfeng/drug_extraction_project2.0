@@ -28,7 +28,7 @@ OLLAMA_MODEL = "gpt-oss:20b"
 MODEL = OLLAMA_MODEL  # 兼容性别名
 
 # 运行模式配置
-IS_DEMO = False  # True: 演示模式(处理前10种药物), False: 生产模式(处理所有药物)
+IS_DEMO = True  # True: 演示模式(处理前10种药物), False: 生产模式(处理所有药物)
 DEMO_LIMIT = 10  # 演示模式处理数量
 BATCH_SIZE = 10  # 生产模式每批处理数量
 

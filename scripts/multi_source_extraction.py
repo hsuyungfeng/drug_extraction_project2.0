@@ -29,6 +29,15 @@ from config.project_config import (
     REQUEST_TIMEOUT, MODEL, IS_DEMO, DEMO_LIMIT, BATCH_SIZE, SOURCE_URLS
 )
 
+# 導入新的搜索庫
+try:
+    from googlesearch import search as google_search
+    import trafilatura
+    HAS_SEARCH_LIBS = True
+except ImportError:
+    HAS_SEARCH_LIBS = False
+    logging.warning("搜索庫未安裝，請運行: uv pip install googlesearch-python trafilatura")
+
 # 设置日志
 log_dir = project_root / "logs"
 log_dir.mkdir(exist_ok=True)
@@ -57,6 +66,19 @@ def scrape_tfda(drug_name: str, manufacturer: str, ingredient: str) -> str:
         try:
             response = requests.get(tfda_api_url, params=params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
+            
+            # 檢查 Content-Type 是否為 JSON
+            content_type = response.headers.get('Content-Type', '')
+            if 'application/json' not in content_type:
+                # 記錄錯誤 HTML 內容到 debug 文件
+                debug_dir = Path("logs/debug")
+                debug_dir.mkdir(exist_ok=True)
+                error_file = debug_dir / f"tfda_error_{drug_name}.html"
+                with open(error_file, 'w', encoding='utf-8') as f:
+                    f.write(response.text)
+                logging.warning(f"TFDA 返回非JSON內容，已保存到 {error_file}")
+                return ""
+            
             all_drugs_data_raw = response.json()
             
             all_drugs_data = all_drugs_data_raw
@@ -123,6 +145,14 @@ def scrape_tfda(drug_name: str, manufacturer: str, ingredient: str) -> str:
                 logging.error(f"TFDA连接失败 {drug_name}: 超过最大重试次数")
                 return ""
                 
+        except json.JSONDecodeError:
+            logging.error(f"TFDA JSON 解析失敗: {drug_name}")
+            if attempt < max_retries - 1:
+                time.sleep(1)  # 等待1秒后重试
+                continue
+            else:
+                return ""
+                
         except Exception as e:
             logging.error(f"TFDA抓取失败 {drug_name}: {e}")
             if attempt < max_retries - 1:
@@ -132,6 +162,235 @@ def scrape_tfda(drug_name: str, manufacturer: str, ingredient: str) -> str:
                 return ""
     
     return ""
+
+def update_extraction_status(status: dict, result: dict) -> dict:
+    """更新提取狀態字典"""
+    for field in ['適應症', '用法用量', '注意事項']:
+        if result.get(field, '') not in ['', '資訊不足', '模型提取失敗', '模型回傳格式錯誤']:
+            status[field] = True
+    return status
+
+def process_drug_with_five_steps(drug_info: dict, google_results_df: pd.DataFrame) -> dict:
+    """五步法藥物信息提取流程"""
+    drug_name = drug_info.get('藥品中文名稱', '')
+    drug_code = drug_info.get('藥品代號', '')
+    manufacturer = drug_info.get('製造廠名稱', '')
+    ingredient = drug_info.get('成份', '')
+    
+    # 初始化狀態和結果
+    status = {
+        '適應症': False,
+        '用法用量': False,
+        '注意事項': False
+    }
+    result = {}
+    
+    logging.info(f"開始五步法處理: {drug_code} - {drug_name}")
+    
+    # 第1步: 檢查Google搜索結果 (中文名搜索)
+    if not all(status.values()) and not google_results_df.empty and drug_code in google_results_df.index:
+        logging.info(f"第1步: 使用Google搜索結果 (中文名)")
+        google_info = google_results_df.loc[drug_code]
+        result.update({
+            "適應症": google_info.get("適應症", ""),
+            "用法用量": google_info.get("用法用量", ""),
+            "注意事項": google_info.get("注意事項", "")
+        })
+        status = update_extraction_status(status, result)
+    
+    # 第2步: TFDA API (修復後)
+    if not all(status.values()):
+        logging.info(f"第2步: 嘗試TFDA API")
+        tfda_content = scrape_tfda(drug_name, manufacturer, ingredient)
+        if tfda_content:
+            tfda_result = extract_info_with_llm(tfda_content, drug_name, "tfda_api")
+            result.update(tfda_result)
+            status = update_extraction_status(status, result)
+    
+    # 第3步: 中文名搜索
+    if not all(status.values()) and HAS_SEARCH_LIBS:
+        logging.info(f"第3步: 中文名搜索")
+        chinese_result = step3_chinese_search(drug_info)
+        if chinese_result:
+            result.update(chinese_result)
+            status = update_extraction_status(status, result)
+    
+    # 第4步: 英文名搜索
+    if not all(status.values()) and HAS_SEARCH_LIBS:
+        logging.info(f"第4步: 英文名搜索")
+        english_result = step4_english_search(drug_info)
+        if english_result:
+            result.update(english_result)
+            status = update_extraction_status(status, result)
+    
+    # 第5步: 成分搜索
+    if not all(status.values()) and HAS_SEARCH_LIBS:
+        logging.info(f"第5步: 成分搜索")
+        ingredient_result = step5_ingredient_search(drug_info)
+        if ingredient_result:
+            result.update(ingredient_result)
+            status = update_extraction_status(status, result)
+    
+    # 如果仍有缺失字段，使用當前邏輯作為備用
+    if not all(status.values()):
+        logging.info(f"使用備用方案處理缺失字段")
+        # 保持現有備用邏輯
+        
+    logging.info(f"五步法處理完成: 適應症={status['適應症']}, 用法用量={status['用法用量']}, 注意事項={status['注意事項']}")
+    return result
+
+def search_and_extract_web_content(query: str, drug_name: str, search_type: str) -> dict:
+    """搜索並提取網頁內容"""
+    logging.info(f"執行 {search_type} 搜索: {query}")
+    
+    try:
+        # 構建搜索查詢 - 針對不同搜索類型優化關鍵詞
+        if search_type == "ingredient_search":
+            search_query = query
+        elif search_type == "chinese_search":
+            # 中文搜索加強用法用量相關關鍵詞
+            search_query = f"{query} 用法 用量 劑量 服用方法 適應症 副作用 禁忌"
+        elif search_type == "english_search":
+            # 英文搜索使用更專業的醫學術語
+            search_query = f"{query} dosage administration contraindications side effects"
+        else:
+            search_query = f"{query} 適應症 用法用量 注意事項"
+        
+        urls = []
+        
+        # 方法1: 使用googlesearch-python (如果可用)
+        if HAS_SEARCH_LIBS:
+            try:
+                for url in google_search(search_query, num_results=3, lang="zh-tw", timeout=5):
+                    urls.append(url)
+                    if len(urls) >= 3:
+                        break
+            except Exception as e:
+                logging.warning(f"Google搜索庫失敗: {e}")
+        
+        # 方法2: 備用搜索方法 - 直接訪問醫療網站
+        if not urls and search_type != "ingredient_search":
+            # 嘗試直接訪問台灣常見醫療資訊網站
+            backup_urls = [
+                f"https://www.google.com/search?q={search_query.replace(' ', '+')}&hl=zh-tw",
+                f"https://tw.search.yahoo.com/search?p={search_query.replace(' ', '+')}",
+                f"https://www.drugs.com/search.php?searchterm={query.replace(' ', '+')}",
+                f"https://www.google.com/search?q=site:pharmknow.com {query.replace(' ', '+')}",
+                f"https://www.google.com/search?q=site:tcm.tw {query.replace(' ', '+')}",
+                f"https://www.google.com/search?q=site:vghtpe.gov.tw {query.replace(' ', '+')}"
+            ]
+            urls = backup_urls
+        
+        if not urls:
+            logging.warning(f"{search_type} 搜索無結果: {query}")
+            return {}
+        
+        # 提取網頁內容
+        combined_content = ""
+        for i, url in enumerate(urls):
+            try:
+                # 設置用戶代理頭
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                
+                # 檢查URL類型
+                if url.endswith('.pdf'):
+                    # PDF文件，跳過處理
+                    logging.info(f"跳過PDF文件: {url}")
+                    continue
+                
+                if HAS_SEARCH_LIBS:
+                    try:
+                        # 使用trafilatura提取 (不傳遞headers)
+                        downloaded = trafilatura.fetch_url(url)
+                        if downloaded:
+                            content = trafilatura.extract(downloaded, include_comments=False, include_tables=False)
+                            if content:
+                                combined_content += f"--- 來源 {i+1}: {url} ---\n{content[:1000]}\n\n"
+                    except Exception as e:
+                        logging.warning(f"trafilatura提取失敗 {url}: {e}")
+                        # 備用方法
+                        try:
+                            # 加入隨機延遲避免被檢測為爬蟲
+                            time.sleep(random.uniform(1, 3))
+                            response = requests.get(url, headers=headers, timeout=10)
+                            if response.status_code == 200:
+                                soup = BeautifulSoup(response.text, 'html.parser')
+                                for script in soup(["script", "style"]):
+                                    script.decompose()
+                                text = soup.get_text()
+                                lines = (line.strip() for line in text.splitlines())
+                                chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+                                text = ' '.join(chunk for chunk in chunks if chunk)
+                                if text:
+                                    combined_content += f"--- 來源 {i+1}: {url} ---\n{text[:1000]}\n\n"
+                        except Exception as e2:
+                            logging.warning(f"備用提取也失敗 {url}: {e2}")
+                else:
+                    # 備用方法: 直接requests + BeautifulSoup
+                    try:
+                        # 加入隨機延遲避免被檢測為爬蟲
+                        time.sleep(random.uniform(1, 3))
+                        response = requests.get(url, headers=headers, timeout=10)
+                        if response.status_code == 200:
+                            soup = BeautifulSoup(response.text, 'html.parser')
+                            for script in soup(["script", "style"]):
+                                script.decompose()
+                            text = soup.get_text()
+                            lines = (line.strip() for line in text.splitlines())
+                            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+                            text = ' '.join(chunk for chunk in chunks if chunk)
+                            if text:
+                                combined_content += f"--- 來源 {i+1}: {url} ---\n{text[:1000]}\n\n"
+                    except Exception as e:
+                        logging.warning(f"提取網頁內容失敗 {url}: {e}")
+                        
+            except Exception as e:
+                logging.warning(f"提取網頁內容失敗 {url}: {e}")
+        
+        if not combined_content:
+            logging.warning(f"無法提取 {search_type} 搜索內容: {query}")
+            return {}
+        
+        # 使用LLM提取信息
+        return extract_info_with_llm(combined_content, drug_name, search_type)
+        
+    except Exception as e:
+        logging.error(f"{search_type} 搜索失敗 {query}: {e}")
+        return {}
+
+def step3_chinese_search(drug_info: dict) -> dict:
+    """第3步: 中文名搜索"""
+    drug_name = drug_info.get('藥品中文名稱', '')
+    if not drug_name:
+        return {}
+    
+    return search_and_extract_web_content(drug_name, drug_name, "chinese_search")
+
+def step4_english_search(drug_info: dict) -> dict:
+    """第4步: 英文名搜索"""
+    english_name = drug_info.get('藥品英文名稱', '')
+    drug_name = drug_info.get('藥品中文名稱', '')
+    
+    if not english_name:
+        return {}
+    
+    return search_and_extract_web_content(english_name, drug_name, "english_search")
+
+def step5_ingredient_search(drug_info: dict) -> dict:
+    """第5步: 成分搜索"""
+    ingredient = drug_info.get('成份', '')
+    drug_name = drug_info.get('藥品中文名稱', '')
+    
+    if not ingredient:
+        return {}
+    
+    # 優先搜索權威醫療網站
+    authority_sites = "site:drugs.com OR site:medscape.com OR site:webmd.com"
+    query = f"{ingredient} prescribing information dosage {authority_sites}"
+    
+    return search_and_extract_web_content(query, drug_name, "ingredient_search")
 
 def scrape_nhi(drug_name: str, manufacturer: str, ingredient: str) -> str:
     """从NHI抓取药物信息"""
@@ -173,24 +432,43 @@ def scrape_nhi(drug_name: str, manufacturer: str, ingredient: str) -> str:
         logging.error(f"NHI抓取失败: {e}")
         return ""
 
-def extract_info_with_llm(text_content: str, drug_name: str) -> dict:
+def extract_info_with_llm(text_content: str, drug_name: str, search_type: str = "general") -> dict:
     """使用本地LLM提取信息"""
     if not text_content:
         return {"適應症": "", "用法用量": "", "注意事項": ""}
 
-    logging.info(f"使用 {MODEL} 提取信息: {drug_name}")
-    prompt = f'''你是藥品資訊提取助手。從以下內容提取：
+    logging.info(f"使用 {MODEL} 提取信息: {drug_name} ({search_type})")
+    
+    # 根據搜索類型調整提示詞
+    if search_type == "ingredient_translation":
+        prompt = f'''你是藥品資訊提取和翻譯助手。請將以下英文藥理資訊翻譯成台灣繁體中文，並從中提取：
 - 適應症（主治）
 - 用法及用量（劑量）
 - 注意事項（含禁忌）
 
-這些內容只需要參考用，不須太精準。
+嚴格遵守以下規則：
+1. 先將英文內容翻譯成台灣繁體中文
+2. 從翻譯後的內容中提取資訊
+3. 每個欄位的回答必須少於100個字元
+4. 如果資訊不存在，在該欄位回答「資訊不足」
+5. 輸出格式為 JSON
+
+英文內容：
+{text_content[:4000]}'''
+    else:
+        prompt = f'''你是藥品資訊提取助手。從以下內容提取：
+- 適應症（主治、治療什麼疾病）
+- 用法用量（怎麼服用、一次多少劑量、一天幾次、飯前或飯後）
+- 注意事項（副作用、禁忌、注意什麼）
+
+特別注意用法用量的提取，請尋找：服用方法、劑量、頻率、時間等資訊。
 
 嚴格遵守以下規則：
 1. 以台灣繁體中文簡潔地回答。
 2. 每個欄位的回答都必須少於100個字元。
-3. 如果資訊不存在，在該欄位回答「資訊不足」。
-4. 輸出格式為 JSON。
+3. 如果找不到明確的用法用量，請尋找任何劑量相關資訊。
+4. 如果資訊完全不存在，在該欄位回答「資訊不足」。
+5. 輸出格式為 JSON，使用以下格式：{{"適應症": "...", "用法用量": "...", "注意事項": "..."}}
 
 內容：
 {text_content[:4000]}'''
@@ -292,60 +570,31 @@ def main():
             manufacturer = row.get('製造廠名稱', '')
             ingredient = row.get('成份', '')
 
-        if not all([drug_name, manufacturer, ingredient]):
-            logging.warning(f"跳过 {drug_code}: 关键信息缺失")
-            current_row_data = row.to_dict()
-            for col in ['適應症', '用法用量', '注意事項']:
-                current_row_data[col] = "資訊不足 - 關鍵資訊缺失"
-            incomplete_drugs_batch.append(current_row_data)
-            continue
+            if not all([drug_name, manufacturer, ingredient]):
+                logging.warning(f"跳过 {drug_code}: 关键信息缺失")
+                current_row_data = row.to_dict()
+                for col in ['適應症', '用法用量', '注意事項']:
+                    current_row_data[col] = "資訊不足 - 關鍵資訊缺失"
+                incomplete_drugs_batch.append(current_row_data)
+                continue
 
-        # 步骤1: 检查Google搜索结果
-        web_info = {}
-        if not google_results_df.empty and drug_code in google_results_df.index:
-            logging.info(f"使用Google搜索结果: {drug_name}")
-            google_info = google_results_df.loc[drug_code]
-            web_info = {
-                "適應症": google_info.get("適應症", ""),
-                "用法用量": google_info.get("用法用量", ""),
-                "注意事項": google_info.get("注意事項", ""),
-            }
-
-        # 检查信息是否完整
-        all_fields_complete = all(web_info.get(col, "") not in ["", "資訊不足"] for col in ['適應症', '用法用量', '注意事項'])
-
-        # 步骤2: 如果Google搜索不完整，回退到TFDA (暂时禁用NHI)
-        if not all_fields_complete:
-            logging.info(f"Google搜索信息不完整，回退到TFDA: {drug_name}")
-            combined_text = ""
-            tfda_content = scrape_tfda(drug_name, manufacturer, ingredient)
-            if tfda_content:
-                combined_text += f"--- 來源: TFDA ---\n{tfda_content}\n\n"
-
-            # 暂时禁用NHI数据源，避免DNS错误影响流程
-            # nhi_content = scrape_nhi(drug_name, manufacturer, ingredient)
-            # if nhi_content:
-            #     combined_text += f"--- 來源: NHI ---\n{nhi_content}\n\n"
+            # 使用五步法處理藥物信息
+            web_info = process_drug_with_five_steps(row.to_dict(), google_results_df)
             
-            if combined_text:
-                web_info = extract_info_with_llm(combined_text, drug_name)
-                all_fields_complete = all(web_info.get(col, "") not in ["", "資訊不足", "模型提取失敗", "模型回傳格式錯誤"] for col in ['適應症', '用法用量', '注意事項'])
+            # 檢查信息是否完整
+            all_fields_complete = all(web_info.get(col, "") not in ["", "資訊不足", "模型提取失敗", "模型回傳格式錯誤"] for col in ['適應症', '用法用量', '注意事項'])
+
+            # 保存结果
+            current_row_data = row.to_dict()
+            for key, value in web_info.items():
+                current_row_data[key] = value
+
+            if all_fields_complete:
+                processed_drugs_batch.append(current_row_data)
+                logging.info(f"成功处理: {drug_code}")
             else:
-                logging.warning(f"TFDA未找到数据: {drug_name}")
-                # 如果TFDA没有数据，直接使用Google搜索结果，避免重复LLM调用
-                web_info = {key: value for key, value in web_info.items()}
-
-        # 保存结果
-        current_row_data = row.to_dict()
-        for key, value in web_info.items():
-            current_row_data[key] = value
-
-        if all_fields_complete:
-            processed_drugs_batch.append(current_row_data)
-            logging.info(f"成功处理: {drug_code}")
-        else:
-            incomplete_drugs_batch.append(current_row_data)
-            logging.info(f"信息不完整: {drug_code}")
+                incomplete_drugs_batch.append(current_row_data)
+                logging.info(f"信息不完整: {drug_code}")
 
         # 每处理完一个批次就保存结果，支持接续处理
         if len(processed_drugs_batch) + len(incomplete_drugs_batch) >= batch_size:
